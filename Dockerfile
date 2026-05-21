@@ -32,13 +32,12 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
 
 WORKDIR /workspaces/serena
 
-# Deps first for layer caching
-COPY pyproject.toml uv.lock README.md ./
-RUN uv venv \
- && VIRTUAL_ENV=/workspaces/serena/.venv uv sync --frozen --no-install-project --no-dev
-
+# Copy everything first (loses some layer-cache efficiency but is bulletproof)
 COPY . /workspaces/serena/
-RUN VIRTUAL_ENV=/workspaces/serena/.venv uv pip install --no-deps -e .
+
+# Single sync: installs deps from lockfile AND the project itself (with scripts)
+RUN uv venv \
+ && VIRTUAL_ENV=/workspaces/serena/.venv uv sync --frozen --no-dev
 ENV PATH="/workspaces/serena/.venv/bin:${PATH}" \
     VIRTUAL_ENV="/workspaces/serena/.venv"
 
