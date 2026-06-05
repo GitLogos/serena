@@ -1,60 +1,84 @@
-# syntax=docker/dockerfile:1.7
+# Base stage with common dependencies
 FROM python:3.11-slim AS base
+
 SHELL ["/bin/bash", "-c"]
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    DEBIAN_FRONTEND=noninteractive
+# Set environment variables to make Python print directly to the terminal and avoid .pyc files.
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
 
+# Install system dependencies required for package manager and build tools.
+# sudo, wget, zip needed for some assistants, like junie
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl build-essential git ssh sudo wget zip unzip \
+    curl \
+    build-essential \
+    git \
+    ssh \
+    sudo \
+    wget \
+    zip \
+    unzip \
+    sed \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m pip install --no-cache-dir pipx && pipx ensurepath
+# Install pipx
+RUN python3 -m pip install --no-cache-dir pipx \
+    && pipx ensurepath
 
-ENV NVM_VERSION=0.40.3 \
-    NODE_VERSION=22.18.0 \
-    NVM_DIR=/root/.nvm
-RUN curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v${NVM_VERSION}/install.sh | bash \
- && . "$NVM_DIR/nvm.sh" \
- && nvm install ${NODE_VERSION} \
- && nvm alias default v${NODE_VERSION}
-ENV PATH="${NVM_DIR}/versions/node/v${NODE_VERSION}/bin:${PATH}:/root/.local/bin"
+# Install nodejs
+ENV NVM_VERSION=0.40.3
+ENV NODE_VERSION=22.18.0
+RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v${NVM_VERSION}/install.sh | bash
 
+# Standard location
+ENV NVM_DIR=/root/.nvm
+RUN . "$NVM_DIR/nvm.sh" && nvm install ${NODE_VERSION}
+RUN . "$NVM_DIR/nvm.sh" && nvm use v${NODE_VERSION}
+RUN . "$NVM_DIR/nvm.sh" && nvm alias default v${NODE_VERSION}
+ENV PATH="${NVM_DIR}/versions/node/v${NODE_VERSION}/bin/:${PATH}"
+
+# Add local bin to the path
+ENV PATH="${PATH}:/root/.local/bin"
+
+# Install the latest version of uv
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 
-ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo
+# Install Rust and rustup for rust-analyzer support (minimal profile)
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
 ENV PATH="${CARGO_HOME}/bin:${PATH}"
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-        sh -s -- -y --default-toolchain stable --profile minimal \
- && rustup component add rust-analyzer
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+    --default-toolchain stable \
+    --profile minimal \
+    && rustup component add rust-analyzer
 
+# Set the working directory
 WORKDIR /workspaces/serena
 
-# Copy everything first (loses some layer-cache efficiency but is bulletproof)
+# Copy all files for development
 COPY . /workspaces/serena/
 
-# Single sync: installs deps from lockfile AND the project itself (with scripts)
-RUN uv venv \
- && VIRTUAL_ENV=/workspaces/serena/.venv uv sync --frozen --no-dev
-ENV PATH="/workspaces/serena/.venv/bin:${PATH}" \
-    VIRTUAL_ENV="/workspaces/serena/.venv"
-
+# Create Serena configuration
 ENV SERENA_HOME=/workspaces/serena/config
-RUN mkdir -p "$SERENA_HOME" \
- && cp src/serena/resources/serena_config.template.yml "$SERENA_HOME/serena_config.yml" \
- && sed -i \
-        -e 's/^gui_log_window: .*/gui_log_window: False/' \
-        -e 's/^web_dashboard_listen_address: .*/web_dashboard_listen_address: 0.0.0.0/' \
-        -e 's/^web_dashboard_open_on_launch: .*/web_dashboard_open_on_launch: False/' \
-        "$SERENA_HOME/serena_config.yml"
+RUN mkdir -p $SERENA_HOME
+RUN cp src/serena/resources/serena_config.template.yml $SERENA_HOME/serena_config.yml
+RUN sed -i 's/^gui_log_window: .*/gui_log_window: False/' $SERENA_HOME/serena_config.yml
+RUN sed -i 's/^web_dashboard_listen_address: .*/web_dashboard_listen_address: 0.0.0.0/' $SERENA_HOME/serena_config.yml
+RUN sed -i 's/^web_dashboard_open_on_launch: .*/web_dashboard_open_on_launch: False/' $SERENA_HOME/serena_config.yml
 
-EXPOSE 9121 24282
+# --- FIXED SECTION ---
+# 1. Create virtual environment cleanly inside the workspaces directory
+RUN uv venv /workspaces/serena/.venv
 
-ENTRYPOINT ["/bin/bash", "-c", "source .venv/bin/activate && exec \"$0\" \"$@\""]
+# 2. Update the environment variables globally so future steps automatically map to the venv
+ENV VIRTUAL_ENV=/workspaces/serena/.venv
+ENV PATH="/workspaces/serena/.venv/bin:${PATH}"
 
-# ---- production stage required by compose.yaml ----
-FROM base AS production
-CMD ["uv", "run", "--directory", ".", "serena-mcp-server", \
-     "--transport", "sse", "--port", "9121", "--host", "0.0.0.0"]
+# 3. Install dependencies by invoking uv's pip directly against the created venv path
+RUN uv pip install -r pyproject.toml -e .
+
+# 4. Entrypoint to ensure environment is activated gracefully and passes standard positional arguments
+ENTRYPOINT ["/bin/bash", "-c", "source /workspaces/serena/.venv/bin/activate && exec \"$@\"", "--"]
+
+# 5. Default CMD pointing to the main execution script so the container stays up/operational on boot
+CMD ["serena"]
